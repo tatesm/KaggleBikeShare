@@ -31,3 +31,42 @@ humidplot <- ggplot(data = bike_train, aes(x = humidity, y = count))+
 
 
 (weatherplot + workingplot)/ (tempplot + humidplot)
+
+
+#Linear Regression Model
+bike_train <- vroom("train.csv")
+testData   <- vroom("test.csv")
+
+cat_cols <- c("season", "holiday", "workingday", "weather")
+bike_train <- bike_train %>%
+  mutate(across(all_of(cat_cols), factor))
+
+testData <- testData %>%
+  mutate(across(all_of(cat_cols),
+                ~ factor(.x, levels = levels(bike_train[[cur_column()]]))))
+
+bike_train <- bike_train %>%
+  mutate(log_count = log(count))
+
+my_linear_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+fitted_model <- my_linear_model %>%
+  fit(log_count ~ season + holiday + workingday + weather +
+        atemp + humidity + windspeed,
+      data = bike_train)
+
+
+bike_predictions <- predict(fitted_model, new_data = testData)  # .pred is log(count)
+
+kaggle_submission <- bike_predictions %>%
+  bind_cols(testData) %>%
+  transmute(
+    datetime = format(datetime),          # "YYYY-MM-DD HH:MM:SS"
+    count    = pmax(0, exp(.pred))        # back-transform from log(count)
+    
+  )
+
+
+vroom_write(x = kaggle_submission, path = "LinearPreds.csv", delim = ",")
