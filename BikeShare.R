@@ -28,26 +28,42 @@ bike_train <- bike_train %>%
 ##    Also remove timestamp column after extracting hour.
 ## -------------------------
 bike_recipe <- recipe(count ~ ., data = bike_train) %>%
+  # recode + factors
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
   step_mutate(weather = factor(weather)) %>%
-  step_mutate(season = factor(season)) %>%
-  step_time(datetime, features = "hour") %>%                 # creates `datetime_hour`
+  step_mutate(season  = factor(season)) %>%
+  
+  # hour → cyclic
+  step_time(datetime, features = "hour") %>%
   step_mutate(
-    hour_num = as.numeric(datetime_hour),                    # make numeric, avoid name clash
+    hour_num = as.numeric(datetime_hour),
     hour_sin = sin(2 * pi * hour_num / 24),
     hour_cos = cos(2 * pi * hour_num / 24)
   ) %>%
-  step_rm(datetime_hour, hour_num, datetime) %>%             # clean up
+  
+  # season → cyclic
   step_mutate(
     season_sin = sin(2 * pi * as.numeric(season) / 4),
     season_cos = cos(2 * pi * as.numeric(season) / 4)
   ) %>%
-  step_rm(season) %>%
-  step_dummy(all_nominal_predictors()) %>%
+  
+  # clean up raw cols
+  step_rm(datetime_hour, hour_num, datetime) %>%
+  
+  # one-hot the categorical (weather and any others)
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  # --- INTERACTIONS ---
+  # weather × hour (cyclic)
+  step_interact( ~ (starts_with("weather_")):(hour_sin + hour_cos)) %>%
+  # season × hour (cyclic × cyclic)
+  step_interact( ~ (season_sin + season_cos):(hour_sin + hour_cos)) %>%
+  # weather × season (dummies × cyclic)
+  step_interact( ~ (starts_with("weather_")):(season_sin + season_cos)) %>%
+  
+  # finishers
   step_zv(all_predictors()) %>%
   step_normalize(all_numeric_predictors())
-
-
 ## Prep once so we can show the baked training rows later
 prepped <- prep(bike_recipe)
 baked_train <- bake(prepped, new_data = NULL)
@@ -62,56 +78,47 @@ preg_normodel <- linear_reg(penalty = tune(), mixture = tune()) %>%
 
 # Workflow with predictors/outcome
 preg_normwf <- workflow() %>%
-  add_model(preg_normodel) %>%
-  add_recipe(bike_recipe)
+  add_recipe(bike_recipe) %>%
+  add_model(preg_normodel)
 
-# Define a grid of penalty/mixture combos
-lambda_grid <- grid_regular(
-  penalty(range = c(-3, 1)), # log10 penalty: 10^-3 to 10^1
-  mixture(),                 # values from 0 to 1
-  levels = 5                 # number of values per parameter
-)
+grid_of_tuning_params <- grid_regular(penalty(),
+                                      mixture(),
+                                      levels = 5)
 
 # Fit across resamples (e.g. cross-validation)
-cv_folds <- vfold_cv(bike_train, v = 5)
+folds <- vfold_cv(bike_train, v = 5)
 
-tuned_res <- tune_grid(
-  preg_normwf,
-  resamples = cv_folds,
-  grid = lambda_grid,
-  control = control_grid(save_pred = TRUE)
-)
+CV_results <- preg_normwf %>%
+tune_grid(resamples=folds,
+          grid=grid_of_tuning_params,
+          metrics=metric_set(rmse, mae)) #Or leave metrics NULL
 
-collect_metrics(tuned_res)
+## Plot Results (example)
+collect_metrics(CV_results) %>% # Gathers metrics into DF
+  filter(.metric=="rmse") %>%
+  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
+  geom_line()
 
-top_5 <- show_best(tuned_res, metric = "rmse", n = 5)
-top_5
 
-all_preds <- collect_predictions(tuned_res)
+## Find Best Tuning Parameters
+bestTune <- CV_results %>%
+select_best(metric="rmse")
 
-# Keep only predictions where penalty/mixture match the top 5
-top5_preds <- all_preds %>%
-  semi_join(top_5, by = c("penalty", "mixture"))
+final_wf <-
+  preg_normwf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=bike_train)
 
-for (i in 1:nrow(top_5)) {
-  
-  # Get the i-th best parameters
-  params <- top_5[i, ]
-  
-  # Finalize workflow with these parameters
-  final_wf <- finalize_workflow(preg_normwf, params)
-  
-  # Fit on full training data
-  fit_wf <- fit(final_wf, data = bike_train)
-  
-  # Predict on test set (still log(count))
-  test_preds <- predict(fit_wf, new_data = bike_test)
+## Predict
+final_wf %>%
+  predict(new_data = bike_test)
   
   # Build Kaggle submission
-  kaggle_submission <- bike_test %>%
-    select(datetime) %>%
-    mutate(count = pmax(0, exp(test_preds$.pred))) %>%  # back-transform + clamp
-    mutate(datetime = format(datetime))                 # "YYYY-MM-DD HH:MM:SS"
+kaggle_submission <- bike_test %>%
+  select(datetime) %>%
+  mutate(count = pmax(0, exp(test_preds$.pred))) %>%  # back-transform + clamp
+  mutate(datetime = format(datetime))                 # "YYYY-MM-DD HH:MM:SS"
+
   
   # File name includes penalty + mixture for traceability
   file_name <- paste0(
@@ -122,7 +129,13 @@ for (i in 1:nrow(top_5)) {
   
   # Write CSV
   vroom_write(kaggle_submission, file_name, delim = ",")
-}
+
+
+
+
+## -------------------------
+## 5) Optimal Model
+## -------------------------
 
 
 
