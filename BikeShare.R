@@ -112,7 +112,8 @@ final_wf <-
 ## Predict
 final_wf %>%
   predict(new_data = bike_test)
-  
+test_preds <- predict(final_wf, new_data = bike_test) %>%
+  bind_cols(bike_test %>% select(datetime))
   # Build Kaggle submission
 kaggle_submission <- bike_test %>%
   select(datetime) %>%
@@ -122,13 +123,13 @@ kaggle_submission <- bike_test %>%
   
   # File name includes penalty + mixture for traceability
   file_name <- paste0(
-    "KagglePreds_pen", round(params$penalty, 5),
-    "_mix", round(params$mixture, 2),
+    "KagglePreds_pen", formatC(bestTune$penalty, format = "fg", digits = 6),
+    "_mix", formatC(bestTune$mixture, format = "fg", digits = 3),
     ".csv"
   )
   
   # Write CSV
-  vroom_write(kaggle_submission, file_name, delim = ",")
+vroom_write(kaggle_submission, file_name, delim = ",")
 
 
 
