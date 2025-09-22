@@ -69,74 +69,86 @@ prepped <- prep(bike_recipe)
 baked_train <- bake(prepped, new_data = NULL)
 
 
+
 ## -------------------------
-## 4) PENALIZED REGRESSION, NORMAL
+## Regression Tree
 ## -------------------------
 
-preg_normodel <- linear_reg(penalty = tune(), mixture = tune()) %>%
-  set_engine("glmnet")
+tree_mod <- decision_tree(
+  cost_complexity = tune(),
+  tree_depth      = tune(),
+  min_n           = tune()
+) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
 
-# Workflow with predictors/outcome
-preg_normwf <- workflow() %>%
+tree_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(preg_normodel)
+  add_model(tree_mod)
 
-grid_of_tuning_params <- grid_regular(penalty(),
-                                      mixture(),
-                                      levels = 5)
+grid_of_tuning_params <- grid_regular(
+  cost_complexity(),   # rpart's cp
+  tree_depth(),        # max depth
+  min_n(),             # min observations to split
+  levels = 10
+)
 
-# Fit across resamples (e.g. cross-validation)
-folds <- vfold_cv(bike_train, v = 5)
+folds <- vfold_cv(bike_train, v = 10, strata = NULL)
 
-CV_results <- preg_normwf %>%
-tune_grid(resamples=folds,
-          grid=grid_of_tuning_params,
-          metrics=metric_set(rmse, mae)) #Or leave metrics NULL
-
-## Plot Results (example)
-collect_metrics(CV_results) %>% # Gathers metrics into DF
-  filter(.metric=="rmse") %>%
-  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
-  geom_line()
-
-
-## Find Best Tuning Parameters
-bestTune <- CV_results %>%
-select_best(metric="rmse")
-
-final_wf <-
-  preg_normwf %>%
-  finalize_workflow(bestTune) %>%
-  fit(data=bike_train)
-
-## Predict
-final_wf %>%
-  predict(new_data = bike_test)
-test_preds <- predict(final_wf, new_data = bike_test) %>%
-  bind_cols(bike_test %>% select(datetime))
-  # Build Kaggle submission
-kaggle_submission <- bike_test %>%
-  select(datetime) %>%
-  mutate(count = pmax(0, exp(test_preds$.pred))) %>%  # back-transform + clamp
-  mutate(datetime = format(datetime))                 # "YYYY-MM-DD HH:MM:SS"
-
-  
-  # File name includes penalty + mixture for traceability
-  file_name <- paste0(
-    "KagglePreds_pen", formatC(bestTune$penalty, format = "fg", digits = 6),
-    "_mix", formatC(bestTune$mixture, format = "fg", digits = 3),
-    ".csv"
+CV_results <- tree_wf %>%
+  tune_grid(
+    resamples = folds,
+    grid      = grid_of_tuning_params,
+    metrics   = metric_set(rmse, mae)
   )
-  
-  # Write CSV
+
+# Look at RMSE across hyperparameters (correct aesthetics)
+library(ggplot2)
+collect_metrics(CV_results) %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(x = cost_complexity, y = mean, color = factor(tree_depth))) +
+  geom_line() +
+  geom_point() +
+  scale_x_log10() +
+  labs(color = "tree_depth")
+
+bestTune <- CV_results %>% select_best(metric = "rmse")
+
+final_fit <- tree_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data = bike_train)
+
+## -------------------------
+## Predict on test + submission
+## -------------------------
+test_preds <- predict(final_fit, new_data = bike_test) %>%
+  bind_cols(bike_test %>% select(datetime))
+
+kaggle_submission <- test_preds %>%
+  transmute(
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S"),
+    count    = pmax(0, round(exp(.pred)))  # back-transform, clamp, make integer
+  )
+
+file_name <- sprintf(
+  "KagglePreds_tree_cp%s_depth%s_min%s.csv",
+  formatC(bestTune$cost_complexity, format = "fg", digits = 6),
+  bestTune$tree_depth,
+  bestTune$min_n
+)
+
 vroom_write(kaggle_submission, file_name, delim = ",")
 
+## Create a workflow with model & recipe
 
+## Set up grid of tuning values
 
+## Set up K-fold CV
 
-## -------------------------
-## 5) Optimal Model
-## -------------------------
+## Find best tuning parameters
+
+## Finalize workflow and predict
+
 
 
 
