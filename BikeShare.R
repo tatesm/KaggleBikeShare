@@ -3,6 +3,7 @@ library(tidymodels)
 library(vroom)
 library(bonsai)
 library(lightgbm)
+library(agua) 
 ## -------------------------
 ## 1) LOAD
 ## -------------------------
@@ -124,7 +125,26 @@ vroom_write(kaggle_submission, file_name, delim = ",")
 
 
 
-## CV tune, finalize and predict here and save results
+
+
+## Initialize an h2o session
+h2o::h2o.init()
+
+## Define the model
+## max_runtime_secs = how long to let h2o.ai run
+## max_models = how many models to stack
+auto_model <- auto_ml() %>%
+  set_engine("h2o", max_models=10) %>%
+  set_mode("regression")
+
+## Combine into Workflow
+automl_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(auto_model) %>%
+  fit(data=bike_train)
+
+## Predict
+preds <- predict(...)
 
 
 
