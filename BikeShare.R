@@ -1,7 +1,8 @@
 library(tidyverse)
 library(tidymodels)
 library(vroom)
-
+library(bonsai)
+library(lightgbm)
 ## -------------------------
 ## 1) LOAD
 ## -------------------------
@@ -34,52 +35,61 @@ bike_recipe <- recipe(count ~ ., data = bike_train) %>%
     weather = ifelse(weather == 4, 3, weather),
     weather = factor(weather),
     season  = factor(season)
+  ) %>%step_date(datetime, features = c("dow", "month", "year")) %>%
+  step_time(datetime, features = c("hour")) %>%
+  # Cyclical encoding for hour + month (useful for tree models, required for linear)
+  step_mutate(
+    # convert ordered factors to numeric *by value*, not by level index
+    hour = as.integer(datetime_hour),
+    month = as.integer(datetime_month)
   ) %>%
-  step_time(datetime, features = "hour") %>%    # makes `datetime_hour`
-  step_mutate(hour = as.numeric(datetime_hour)) %>%  # keep as `hour`
-  step_rm(datetime_hour, datetime) %>%          # drop only source columns
-  step_zv(all_predictors())
+  
+  step_mutate(
+    hour_sin  = sin(2 * pi * hour/24),
+    hour_cos  = cos(2 * pi * hour/24),
+    month_sin = sin(2 * pi * month/12),
+    month_cos = cos(2 * pi * month/12)
+  ) %>%
+  # Drop originals if you want
+  step_rm(datetime, datetime_hour, datetime_month, hour, month) %>%
+  step_zv(all_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%   # handle unseen levels in test
+  step_dummy(all_nominal_predictors(), one_hot = TRUE)
 
 prepped <- prep(bike_recipe)
 baked_train <- bake(prepped, new_data = NULL)
 
-## Random Forest
+## Boosted Tree
 
-
-## Create a workflow with model & recipe
-
-randtree_mod <- rand_forest(mtry = tune(),
-                      min_n=tune(),
-                      trees=tune()) %>% #Type of mode
-  set_engine("ranger") %>% # What R function to use
+boost_model <- boost_tree(  trees          = tune(),
+                            tree_depth     = tune(),
+                            learn_rate     = tune()
+                            ) %>%
+set_engine("lightgbm") %>% #or "xgboost" but lightgbm is faster
   set_mode("regression")
 
-randtree_wf <- workflow() %>%
+
+
+boost_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(randtree_mod)
+  add_model(boost_model)
 
-## Set up grid of tuning values
-
-# After have baked_train:
-# baked_train <- bake(prepped, new_data = NULL)
-
-rf_params <- parameters(
-  # finalize mtry to the number of predictors after the recipe
-  finalize(mtry(range = c(2L, ncol(baked_train) - 1L)), baked_train),
-  min_n(range = c(5L, 20L)),
-  trees(range = c(500L, 1500L))
+boost_params <- parameters(
+  trees(range = c(200, 1200)),
+  learn_rate(range = c(-4, -1)),  # 10^-4 to 10^-1  (~0.0001 to 0.1)
+  tree_depth(range = c(3L, 9L))
 )
 
-rf_grid <- grid_regular(rf_params, levels = 3)
+boost_grid <- grid_regular(boost_params, levels = 3)
 ## Set up K-fold CV
-folds <- vfold_cv(bike_train, v = 10, strata = NULL)
+folds <- vfold_cv(bike_train, v = 6, strata = NULL)
 
 ## Find best tuning parameters
-CV_results <- randtree_wf %>%
+CV_results <- boost_wf %>%
   tune_grid(
     resamples = folds,
-    grid      = rf_grid,
-    metrics   = metric_set(rmse, mae)
+    grid      = boost_grid,
+    metrics   = metric_set(rmse)
   )
 
 
@@ -89,7 +99,7 @@ collect_metrics(CV_results)
 
 bestTune <- CV_results %>% select_best(metric = "rmse")
 
-final_fit <- randtree_wf %>%
+final_fit <- boost_wf %>%
   finalize_workflow(bestTune) %>%
   fit(data = bike_train)
 
@@ -102,10 +112,11 @@ kaggle_submission <- test_preds %>%
     count    = pmax(0, round(exp(.pred)))  # back-transform, clamp, make integer
   )
 
+
 file_name <- sprintf(
-  "KagglePreds_random_forest_mtry%s_minn%s_trees%s.csv",
-  formatC(bestTune$mtry, format = "fg", digits = 6),
-  bestTune$min_n,
+  "KagglePreds_lgbm_lr%0.3f_depth%d_trees%d.csv",
+  bestTune$learn_rate,
+  bestTune$tree_depth,
   bestTune$trees
 )
 
@@ -113,6 +124,7 @@ vroom_write(kaggle_submission, file_name, delim = ",")
 
 
 
+## CV tune, finalize and predict here and save results
 
 
 
