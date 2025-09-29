@@ -60,73 +60,6 @@ bike_recipe <- recipe(count ~ ., data = bike_train) %>%
 prepped <- prep(bike_recipe)
 baked_train <- bake(prepped, new_data = NULL)
 
-## Boosted Tree
-
-boost_model <- boost_tree(  trees          = tune(),
-                            tree_depth     = tune(),
-                            learn_rate     = tune()
-                            ) %>%
-set_engine("lightgbm") %>% #or "xgboost" but lightgbm is faster
-  set_mode("regression")
-
-
-
-boost_wf <- workflow() %>%
-  add_recipe(bike_recipe) %>%
-  add_model(boost_model)
-
-boost_params <- parameters(
-  trees(range = c(200, 1200)),
-  learn_rate(range = c(-4, -1)),  # 10^-4 to 10^-1  (~0.0001 to 0.1)
-  tree_depth(range = c(3L, 9L))
-)
-
-boost_grid <- grid_regular(boost_params, levels = 3)
-## Set up K-fold CV
-folds <- vfold_cv(bike_train, v = 6, strata = NULL)
-
-## Find best tuning parameters
-CV_results <- boost_wf %>%
-  tune_grid(
-    resamples = folds,
-    grid      = boost_grid,
-    metrics   = metric_set(rmse)
-  )
-
-
-collect_metrics(CV_results)
-
-## Find best tuning parameters
-
-bestTune <- CV_results %>% select_best(metric = "rmse")
-
-final_fit <- boost_wf %>%
-  finalize_workflow(bestTune) %>%
-  fit(data = bike_train)
-
-test_preds <- predict(final_fit, new_data = bike_test) %>%
-  bind_cols(bike_test %>% select(datetime))
-
-kaggle_submission <- test_preds %>%
-  transmute(
-    datetime = format(datetime, "%Y-%m-%d %H:%M:%S"),
-    count    = pmax(0, round(exp(.pred)))  # back-transform, clamp, make integer
-  )
-
-
-file_name <- sprintf(
-  "KagglePreds_lgbm_lr%0.3f_depth%d_trees%d.csv",
-  bestTune$learn_rate,
-  bestTune$tree_depth,
-  bestTune$trees
-)
-
-vroom_write(kaggle_submission, file_name, delim = ",")
-
-
-
-
-
 ## Initialize an h2o session
 h2o::h2o.init()
 
@@ -137,17 +70,49 @@ auto_model <- auto_ml() %>%
   set_engine("h2o", max_models=10) %>%
   set_mode("regression")
 
-## Combine into Workflow
 automl_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
   add_model(auto_model) %>%
-  fit(data=bike_train)
+  fit(data = bike_train)
 
-## Predict
-preds <- predict(...)
+preds <- predict(automl_wf, new_data = bike_test)  # tibble with .pred
+
+# Extract the raw H2O AutoML object
+aml <- extract_fit_engine(automl_wf)
+
+# ✅ Leaderboard
+lb <- aml@leaderboard
+lb_df <- as.data.frame(lb)
+print(head(lb_df))   # safer than indexing columns
+# or View(lb_df)
+
+# ✅ Get the leader model directly
+leader <- aml@leader
+print(leader@model_id)
+
+# ✅ Inspect the leader model's parameters
+h2o::h2o.getModel(leader@model_id)@allparameters
 
 
 
+
+
+
+
+
+kaggle_submission <- preds %>%
+  bind_cols(bike_test) %>%                        # add datetime column
+  select(datetime, .pred) %>%                     # keep only datetime + predictions
+  rename(count = .pred) %>%                       # rename prediction column to count
+  mutate(count = pmax(0, round(exp(count)))) %>%  # back-transform, clamp to 0
+  mutate(datetime = as.character(format(datetime)))  # format for Kaggle
+
+## Write to CSV with comma delimiter
+vroom::vroom_write(
+  x = kaggle_submission,
+  file = "./KagglePreds.csv",
+  delim = ","
+)
 
 
 
